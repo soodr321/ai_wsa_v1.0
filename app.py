@@ -99,53 +99,63 @@ st.warning("""
 print("[App] Disclaimers displayed.", flush=True)
 
 
-def parse_fve_and_rating_from_s1(section_1_text: str) -> tuple[float | str | None, str | None]: # FVE can be float or string for robustness
-    """
-    Parses FVE and Rating from Section 1 text.
-    Implement robust regex or string searching here.
-    """
-    print(f"[App Parser] Attempting to parse FVE/Rating from S1 text (first 200 chars): {section_1_text[:200]}...")
+def parse_fve_and_rating_from_s1(section_1_text: str) -> tuple[float | str | None, str | None]:
+    print(f"[App Parser] Attempting to parse FVE/Rating from S1 text (first 300 chars):\n'''{section_1_text[:300]}'''") # Log more for context
     fve_value = None
     rating_value = None
 
-    # FVE Parsing: Looks for dollar amounts after specific keywords.
-    fve_patterns = [
-        r"(?:Fair Value Estimate|FVE)\s*:\s*\$?(\d{1,3}(?:,\d{3})*\.?\d*|\d+\.?\d*)", # Handles $1,234.56 or $123.45 or 123.45
-        r"\$?(\d{1,3}(?:,\d{3})*\.?\d*|\d+\.?\d*)\s*(?:is the Fair Value Estimate|is the FVE)" # Handles $123.45 is the FVE
-    ]
-    for pattern in fve_patterns:
-        fve_match = re.search(pattern, section_1_text, re.IGNORECASE)
-        if fve_match:
-            fve_str = fve_match.group(1).replace(',', '') # Remove commas
+    # FVE Parsing:
+    # Pattern to match "Fair Value Estimate (FVE): $150.00" or "FVE: $150.00" or "Fair Value Estimate: $150.00"
+    # It also handles numbers with or without commas, and with or without cents.
+    fve_pattern_text = r"(?:Fair Value Estimate(?:\s*\(FVE\))?|FVE)\s*:\s*\$?((?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?)"
+    # Explanation of the number part: ((?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?)
+    # 1. (?:\d{1,3}(?:,\d{3})*|\d+)  -- Matches whole numbers:
+    #    - \d{1,3}(?:,\d{3})*  -- Like 1,234,567 or 123
+    #    - |\d+                 -- Or simple numbers like 12345
+    # 2. (?:\.\d+)?                  -- Optionally matches decimal part like .00 or .5
+
+    fve_match = re.search(fve_pattern_text, section_1_text, re.IGNORECASE)
+    if fve_match:
+        fve_str = fve_match.group(1).replace(',', '') # Get captured number string, remove commas
+        try:
+            fve_value = float(fve_str)
+            print(f"[App Parser] Parsed FVE (float): {fve_value}")
+        except ValueError:
+            fve_value = fve_str # Store as string if not convertible (e.g., if LLM includes non-numeric chars)
+            print(f"[App Parser] Parsed FVE (string, could not convert to float): '{fve_value}'")
+    else:
+        # Fallback FVE search if the primary one fails - more general search for a dollar amount near "Fair Value"
+        fve_fallback_match = re.search(r"Fair Value.*?\$?((?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?)", section_1_text, re.IGNORECASE)
+        if fve_fallback_match:
+            fve_str = fve_fallback_match.group(1).replace(',', '')
             try:
                 fve_value = float(fve_str)
-                print(f"[App Parser] Parsed FVE (float): {fve_value}")
+                print(f"[App Parser] Parsed FVE (float - fallback): {fve_value}")
             except ValueError:
-                fve_value = fve_str # Store as string if not convertible, for S9 to display "as-is"
-                print(f"[App Parser] Parsed FVE (string, could not convert to float): {fve_value}")
-            break # Found FVE
+                fve_value = fve_str
+                print(f"[App Parser] Parsed FVE (string - fallback, could not convert to float): '{fve_value}'")
 
-    # Rating Parsing: Looks for common rating terms associated with keywords.
-    # Order matters: More specific patterns first.
-    rating_keywords = r"(?:Rating|Investment Recommendation|Recommendation|Outlook)\s*[:\-is\s]*"
-    common_ratings = r"(Strong Buy|Buy|Accumulate|Outperform|Overweight|Hold|Neutral|Equal-weight|Market Perform|Reduce|Underperform|Sell|Strong Sell)"
+    # Rating Parsing (seems to be working, but let's keep it robust)
+    rating_keywords = r"(?:Concise Stock Rating|Investment Recommendation|Rating|Recommendation)\s*[:\-is\s]*"
+    common_ratings_capture = r"(Strong Buy|Buy|Accumulate|Outperform|Overweight|Hold|Neutral|Equal-weight|Market Perform|Reduce|Underperform|Sell|Strong Sell)"
 
     # Pattern 1: Keyword followed by rating
-    rating_match_1 = re.search(rating_keywords + common_ratings, section_1_text, re.IGNORECASE)
+    rating_match_1 = re.search(rating_keywords + common_ratings_capture, section_1_text, re.IGNORECASE)
     if rating_match_1:
-        rating_value = rating_match_1.group(1).strip().title()
-        print(f"[App Parser] Parsed Rating (Pattern 1): {rating_value}")
-
-    # Pattern 2: Rating mentioned near FVE/Company name (less precise, use as fallback)
-    if not rating_value:
-        # This pattern is broad and might need refinement
-        rating_match_2 = re.search(r"\b" + common_ratings + r"\b", section_1_text, re.IGNORECASE)
+        rating_value = rating_match_1.group(1).strip().title() # .group(1) is the rating itself
+        print(f"[App Parser] Parsed Rating (Pattern 1): '{rating_value}'")
+    else:
+        # Pattern 2: Rating mentioned broadly (less precise, used as fallback)
+        # Ensure it's a whole word match for the rating.
+        rating_match_2 = re.search(r"\b" + common_ratings_capture + r"\b", section_1_text, re.IGNORECASE)
         if rating_match_2:
+            # Check if this rating isn't part of a sentence that negates it, e.g., "Not a Buy"
+            # This requires more complex context checking, for now, we accept it.
             rating_value = rating_match_2.group(1).strip().title()
-            print(f"[App Parser] Parsed Rating (Pattern 2 - broad): {rating_value}")
+            print(f"[App Parser] Parsed Rating (Pattern 2 - broad): '{rating_value}'")
 
-    if not fve_value: print("[App Parser] FVE not found or parsed from S1.")
-    if not rating_value: print("[App Parser] Rating not found or parsed from S1.")
+    if not fve_value: print("[App Parser] FVE not found or parsed from S1 after attempts.")
+    if not rating_value: print("[App Parser] Rating not found or parsed from S1 after attempts.")
     return fve_value, rating_value
 
 
