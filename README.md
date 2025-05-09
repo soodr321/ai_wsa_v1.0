@@ -10,8 +10,7 @@ Absolutely! Crafting a good README is crucial. Let's draft one, and I'll explain
 **Live Application:** [https://aiwsav10-fh8pkwqjqhy6gkzyzrttev.streamlit.app/](https://aiwsav10-fh8pkwqjqhy6gkzyzrttev.streamlit.app/)
 *(Note: This is a proof-of-concept hosted on Streamlit Community Cloud. It may have cold starts or resource limitations.)*
 
-![AI Wall Street Analyst Screenshot](<URL_TO_YOUR_SCREENSHOT_IMAGE_HERE>)
-*(Suggestion: Take a good screenshot of your app showing a generated report and upload it to your GitHub repo, then replace `<URL_TO_YOUR_SCREENSHOT_IMAGE_HERE>` with the direct link to that image in the repo).*
+![AI Wall Street Analyst Screenshot](<https://github.com/soodr321/ai_wsa_v1.0/blob/main/AI_Wall_Street_Analyst_V1.0.jpg>)
 
 ## 📋 Project Overview
 
