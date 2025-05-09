@@ -1,373 +1,216 @@
-# app.py (V1.0 - Restored Full Functionality with Diagnostics)
-
-print("[App] VERY START of app.py execution...", flush=True) # Keep flush for this first one
-
+# app.py
 import streamlit as st
 import os
-import sys # Needed for traceback and flushing specific prints if desired
-from dotenv import load_dotenv
-import traceback # For detailed error logging
-import re # For parsing FVE/Rating in Section 1
+import sys
+from dotenv import load_dotenv # For local .env loading
+import traceback
+import logging # For more structured logging later if needed
 
-# Add an early UI write to test responsiveness
-# We put this *after* initial imports but *before* local module imports
+# --- Streamlit Page Configuration (MUST BE THE FIRST STREAMLIT COMMAND) ---
+# Encapsulate in a try-except block in case of re-runs where it might already be set.
+# This is more of a precaution for some environments; usually, Streamlit handles re-runs gracefully.
 try:
-    st.write("App Script: Standard imports complete...")
-except Exception as initial_st_error:
-    # This is unlikely but could happen if streamlit itself has issues
-    print(f"[App] ERROR during initial st.write: {initial_st_error}", flush=True)
+    st.set_page_config(page_title="AI Stock Analyst", layout="wide")
+    # print("[App] Streamlit page config SET (or confirmed).", flush=True) # Debug print
+except st.errors.StreamlitAPIException as e:
+    if "set_page_config() has already been called" in str(e):
+        pass # print("[App] Page config already set, ignoring re-call.", flush=True) # Debug print
+    else:
+        print(f"[App] Error setting page config: {e}", flush=True) # Debug print for other errors
+        # Optionally, st.error(f"Page config error: {e}") if critical enough to halt.
 
-print("[App] Imports completed.", flush=True)
+print("[App] VERY START of app.py execution...", flush=True) # For debugging startup
+
+# Add project root to Python path if your modules are structured in a way that needs it.
+# For a flat structure like yours (all .py files in the root), this is often not strictly necessary
+# but can be a good practice for consistency or future refactoring.
+# SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+# if SCRIPT_DIR not in sys.path:
+#    sys.path.append(SCRIPT_DIR)
+# print(f"[App] sys.path includes: {SCRIPT_DIR}", flush=True)
 
 
-# --- Load environment variables from .env file ---
+print("[App] Standard library imports completed.", flush=True)
+
+# Load environment variables from .env file (primarily for local Cloud Shell development)
 print("[App] Attempting to load .env file...", flush=True)
-dotenv_loaded = load_dotenv() # *** UNCOMMENTED ***
-if dotenv_loaded:
-    print("[App] .env file found and loaded successfully.", flush=True)
-else:
-    # This is expected behavior when deployed to SCC (uses st.secrets)
-    print("[App] .env file not found or load failed. Will rely on environment variables or Streamlit secrets.", flush=True)
-# Explicit flush after potentially slow file operation
-sys.stdout.flush()
-
-# --- Import your other modules ---
-MODULES_LOADED = False # Flag to track if imports worked
-print("[App] Attempting to import local modules...", flush=True)
 try:
-    import config_loader     # *** UNCOMMENTED ***
-    import llm_handler         # *** UNCOMMENTED ***
-    import data_fetcher      # *** UNCOMMENTED ***
-    import report_generator  # *** UNCOMMENTED ***
-    MODULES_LOADED = True
+    # find_dotenv will search for the .env file, starting from the script's directory
+    # and going up the directory tree. This is robust.
+    env_path = load_dotenv(verbose=True, override=True) # verbose=True helps debug .env loading
+    if env_path:
+        print(f"[App] .env file loaded successfully from: {env_path}", flush=True)
+    else:
+        # This means load_dotenv() ran but didn't find a .env or it was empty.
+        print("[App] .env file not found or is empty. Relying on environment variables or Streamlit secrets.", flush=True)
+except Exception as e:
+    # This catches errors during the load_dotenv() call itself.
+    print(f"[App] Error attempting to load .env file: {e}. Relying on environment variables or Streamlit secrets.", flush=True)
+
+# --- Import Local Modules (AFTER st.set_page_config) ---
+print("[App] Attempting to import local modules...", flush=True)
+local_modules_loaded = False
+try:
+    from config_loader import get_api_key
+    from llm_handler import LLMHandler
+    from data_fetcher import DataFetcher
+    from report_generator import ReportGenerator
+    local_modules_loaded = True
     print("[App] Successfully imported local modules: config_loader, llm_handler, data_fetcher, report_generator.", flush=True)
 except ImportError as e:
-    MODULES_LOADED = False # Ensure flag is False on failure
-    print(f"[App] CRITICAL ERROR importing local modules: {e}", flush=True)
-    traceback.print_exc() # Log full traceback to console
-    # Display error in Streamlit UI AFTER basic UI setup
-    # We defer st.error until the main UI block to avoid potential issues if st fails early
-except Exception as e:
-    MODULES_LOADED = False # Ensure flag is False on failure
-    print(f"[App] CRITICAL UNEXPECTED error importing local modules: {e}", flush=True)
-    traceback.print_exc() # Log full traceback to console
-    # Defer st.error
+    print(f"[App] FATAL ERROR importing local modules: {e}", flush=True)
+    # At this point, if st is available, use it. Otherwise, this print is the best we can do for SCC logs.
+    try:
+        st.error(f"Critical Error: Could not import necessary Python modules. The application cannot start. Please check deployment logs on Streamlit Cloud. Details: {e}")
+    except NameError: # If st itself hasn't been fully set up or is part of the issue.
+        pass # The print statement above will have to suffice.
+    traceback.print_exc() # Always print traceback for detailed debugging in logs
+    # Consider st.stop() if st is available and you want to halt script execution cleanly
+    if 'st' in globals() and hasattr(st, 'stop'):
+        st.stop()
+    else:
+        sys.exit(1) # Force exit if Streamlit context is unavailable for st.stop()
 
-print(f"[App] Local modules loaded status: {MODULES_LOADED}", flush=True)
-sys.stdout.flush()
+# --- Configuration & Initialization (AFTER st.set_page_config and local imports) ---
+print(f"[App] Local modules loaded status: {local_modules_loaded}", flush=True)
 
-# --- Main App UI Setup ---
-print("[App] Setting up Streamlit page config and title...", flush=True)
-st.set_page_config(page_title="AI Stock Analyst", layout="wide")
+# Proceed only if local modules were loaded successfully
+if local_modules_loaded:
+    print("[App] Attempting to retrieve API key...", flush=True)
+    api_key = get_api_key("GOOGLE_API_KEY")
+
+    if not api_key:
+        # get_api_key in config_loader.py will print its own detailed message to the console.
+        # It may also try to use st.error if st is available in its context.
+        # We add an st.error here as a fallback/confirmation in the main app flow.
+        st.error("🔴 CRITICAL ERROR: GOOGLE_API_KEY not found. Please ensure it's set in Streamlit secrets for deployed apps, or in your .env file for local development. Application cannot proceed.")
+        print("🔴 CRITICAL ERROR in app.py: GOOGLE_API_KEY not found after call to get_api_key. Halting.", flush=True)
+        st.stop() # Stop the app if API key is missing
+    else:
+        print("[App] API Key retrieved successfully.", flush=True)
+        # Initialize handlers only if API key is present and modules are loaded
+        try:
+            llm_handler_instance = LLMHandler(api_key=api_key)
+            data_fetcher_instance = DataFetcher()
+            report_generator_instance = ReportGenerator(llm_handler_instance, data_fetcher_instance)
+            print("[App] Core handlers (LLM, DataFetcher, ReportGenerator) initialized successfully.", flush=True)
+        except Exception as e:
+            print(f"[App] FATAL ERROR initializing core handlers: {e}", flush=True)
+            st.error(f"Critical Error: Could not initialize application components. Details: {e}")
+            traceback.print_exc()
+            st.stop()
+else:
+    # This else block will be hit if local_modules_loaded is False from the import try-except block.
+    # An error message and st.stop() or sys.exit() would have already been called.
+    # Adding a print here for completeness in the log, though it might be redundant.
+    print("[App] Halting due to failure in loading local modules.", flush=True)
+    # Ensure app stops if st.stop() wasn't reached or effective.
+    if 'st' in globals() and hasattr(st, 'stop'):
+        st.stop()
+    else:
+        sys.exit(1)
+
+
+# --- Main App UI Setup (AFTER st.set_page_config) ---
 st.title("📈 AI Wall Street Analyst (v1.0 POC)")
-print("[App] Streamlit page config and title SET.", flush=True)
+print("[App] Streamlit title SET.", flush=True)
 
-# Display module loading error message HERE if necessary
-if not MODULES_LOADED:
-    st.error("""
-    **CRITICAL ERROR: Failed to load essential Python code modules.**
-
-    The application cannot continue. Please check the Cloud Shell terminal logs for detailed error messages related to module imports (`config_loader`, `llm_handler`, `data_fetcher`, `report_generator`).
-
-    Possible causes:
-    - Files are missing or have incorrect names.
-    - Syntax errors within the module files.
-    - Missing dependencies within the virtual environment.
-    - Issues with file permissions.
-    """)
-    print("[App] Halting UI setup because local modules failed to load.")
-    st.stop() # Stop the script here if modules are missing
-
-# If modules loaded, continue with the rest of the UI
 st.markdown("""
-Enter a valid US stock ticker symbol below to generate a basic equity research report using Google Gemini.
+Welcome to the AI Wall Street Analyst! This Proof-of-Concept (POC) application demonstrates
+the capability to generate a basic stock analysis report using AI.
+
+**Enter a valid U.S. stock ticker symbol below and click "Generate Report".**
 """)
 
+# --- Disclaimer ---
 st.warning("""
-**Disclaimer:** This is a Proof-of-Concept application using AI (Google Gemini).
-The generated analysis is based on publicly available data (Yahoo Finance) and may have limitations or inaccuracies.
-Data may be delayed. The AI may make mistakes. **This is NOT financial advice.**
-Always conduct your own thorough research or consult with a qualified financial advisor before making investment decisions.
-""", icon="⚠️")
+**⚠️ Disclaimer:**
+*   This application is a Proof-of-Concept and for demonstration purposes only.
+*   The information provided is AI-generated and may contain inaccuracies or omissions.
+*   Data is sourced from Yahoo Finance and may have its own limitations or delays.
+*   **This is NOT financial advice. Always do your own thorough research or consult with a qualified financial advisor before making any investment decisions.**
+""")
+print("[App] Disclaimers displayed.", flush=True)
 
-# --- Report Generation Function (Orchestration Logic) ---
-# Make sure this is defined before it's called by the button logic
+# --- Report Generation Function ---
 def run_report_generation(ticker_symbol):
-    print(f"\n[App:run_report_generation] FUNCTION CALLED for ticker: {ticker_symbol}", flush=True)
-    """Orchestrates the report generation process."""
-    # Add a write inside the function start
-    st.write("Starting report generation process...")
+    """
+    Orchestrates the report generation process.
+    """
+    global report_generator_instance # Use the globally initialized instance
 
-    # 1. Configure LLM
-    st.write("Step 1: Configuring LLM...")
-    if not hasattr(llm_handler, 'configure_llm') or not hasattr(llm_handler, 'generate_text'):
-        st.error("LLM handler functions not found. Please check llm_handler.py.")
-        print("[App:run_report_generation] LLM handler function(s) missing.")
+    if not report_generator_instance:
+        st.error("Error: Report generator not initialized. Cannot proceed.")
+        print("[App] Error in run_report_generation: report_generator_instance is None.", flush=True)
         return
-    
-    llm_config_success = llm_handler.configure_llm() # Store result
-    if not llm_config_success:
-        st.error("LLM configuration failed. Check API Key setup (.env file or Streamlit secrets) and console logs.")
-        print("[App:run_report_generation] LLM configuration returned false.")
-        # Display message from config_loader if available (requires modification to config_loader to store/return messages)
-        # config_message = config_loader.get_last_message() # Example - requires changes in config_loader
-        # if config_message: st.info(f"Configuration Loader Message: {config_message}")
-        return # Stop if LLM fails
-    st.write("   ✓ LLM Configured")
-    print("[App:run_report_generation] LLM Configured.", flush=True)
 
-    # 2. Fetch Data
-    st.write(f"Step 2: Fetching data for {ticker_symbol}...")
-    fetcher = None
-    company_info = None
-    quote_data = None
-    financial_summary = None
-    news = None
-    company_name = ticker_symbol
-    data_fetched_successfully = False
-
+    print(f"[App] Report generation requested for ticker: {ticker_symbol}", flush=True)
     try:
-        if not hasattr(data_fetcher, 'StockDataFetcher'):
-            st.error("StockDataFetcher class not found. Please check data_fetcher.py.")
-            print("[App:run_report_generation] StockDataFetcher class missing.")
-            return
+        with st.spinner(f"Generating report for {ticker_symbol}... This may take a minute or two..."):
+            print(f"[App] Inside spinner for {ticker_symbol}. Calling report_generator.generate_full_report().", flush=True)
+            # Ensure that report_generator_instance and its methods are correctly called
+            final_report_md, parsed_fve_s1, parsed_rating_s1, parsed_fve_s9, parsed_rating_s9 = report_generator_instance.generate_full_report(ticker_symbol)
+            print(f"[App] Report generation completed for {ticker_symbol}. Checking report content.", flush=True)
 
-        print("[App:run_report_generation] Initializing StockDataFetcher...", flush=True)
-        fetcher = data_fetcher.StockDataFetcher(ticker_symbol)
-        print("[App:run_report_generation] Fetching company info...", flush=True)
-        company_info = fetcher.get_company_info()
-        print("[App:run_report_generation] Fetching quote data...", flush=True)
-        quote_data = fetcher.get_quote_data()
-        print("[App:run_report_generation] Fetching financial summary...", flush=True)
-        financial_summary = fetcher.get_financial_summary()
-        print("[App:run_report_generation] Fetching news...", flush=True)
-        news = fetcher.get_news()
+        if "error" in final_report_md.lower() or "failed" in final_report_md.lower():
+            st.error(f"Could not generate a full report for {ticker_symbol}. The process encountered an issue.")
+            st.markdown("### Partial or Error Information:")
+            st.markdown(final_report_md) # Display whatever was returned, even if it's an error message
+            print(f"[App] Error reported in final_report_md for {ticker_symbol}.", flush=True)
 
-        if company_info and company_info.get('longName'):
-            company_name = company_info['longName']
-        st.write(f"   -> Fetched data for: {company_name}")
-        
-        if not company_info or not quote_data:
-             st.warning("Warning: Could not retrieve essential company or quote data. Report quality may be impacted.")
-        
-        if news is None:
-            news = []
-            st.info("No news items found or news fetching might have failed.")
+        elif final_report_md and "No data found for ticker" not in final_report_md : # A more specific check if yfinance returns no data
+            st.success(f"Report for {ticker_symbol} generated successfully!")
+            st.markdown("---")
+            st.markdown(final_report_md)
+            print(f"[App] Report for {ticker_symbol} displayed successfully.", flush=True)
 
-        data_fetched_successfully = True
-        st.write("   ✓ Data Fetched")
-        print("[App:run_report_generation] Data Fetched.", flush=True)
-
-    except ValueError as ve:
-        st.error(f"Error fetching data: {ve}. Likely an invalid ticker ('{ticker_symbol}'). Please check and try again.")
-        print(f"[App:run_report_generation] ValueError during data fetching for {ticker_symbol}: {ve}", flush=True)
-        return
-    except Exception as e:
-        st.error(f"An unexpected error occurred during data fetching for {ticker_symbol}:")
-        st.exception(e)
-        print(f"[App:run_report_generation] Data fetching error for {ticker_symbol}: {e}", flush=True)
-        traceback.print_exc()
-        return
-
-    # 3. Generate Sections
-    st.write("Step 3: Generating report sections with AI...")
-    print("\n[App:run_report_generation] Starting section generation...", flush=True)
-    report_sections = []
-    parsed_fve = None
-    parsed_rating = None
-
-    # --- Internal Helper ---
-    def generate_and_append(section_func_obj, section_name_str, *args_for_func, **kwargs_for_func):
-        nonlocal report_sections
-        st.write(f"   - Generating {section_name_str}...")
-        print(f"[App:run_report_generation]   - Generating {section_name_str}...", flush=True)
-        try:
-            if not callable(section_func_obj):
-                 raise TypeError(f"Object for {section_name_str} is not callable.")
-            output = section_func_obj(*args_for_func, **kwargs_for_func)
-            if output and isinstance(output, str):
-                 report_sections.append(output)
-                 st.write(f"     ✓ {section_name_str} generated.")
-                 print(f"[App:run_report_generation]     ✓ {section_name_str} Success.", flush=True)
-                 return output
+            # Consistency Check (as per PRD)
+            print(f"[App] Performing consistency check for {ticker_symbol}: S1_FVE='{parsed_fve_s1}', S1_Rating='{parsed_rating_s1}', S9_FVE='{parsed_fve_s9}', S9_Rating='{parsed_rating_s9}'", flush=True)
+            if parsed_fve_s1 is not None and parsed_rating_s1 is not None: # Ensure S1 values were parsed
+                if parsed_fve_s1 == parsed_fve_s9 and parsed_rating_s1 == parsed_rating_s9:
+                    st.info("✅ Consistency Check: FVE and Rating from Section 1 are correctly restated in Section 9.")
+                    print(f"[App] Consistency CHECK PASSED for {ticker_symbol}.", flush=True)
+                else:
+                    st.warning(f"""
+                        ⚠️ Consistency Check Alert for {ticker_symbol}:
+                        - Section 1 FVE: '{parsed_fve_s1}', Section 9 FVE: '{parsed_fve_s9}'
+                        - Section 1 Rating: '{parsed_rating_s1}', Section 9 Rating: '{parsed_rating_s9}'
+                        There might be a discrepancy in FVE/Rating between sections.
+                    """)
+                    print(f"[App] Consistency CHECK ALERT for {ticker_symbol}: Discrepancy found.", flush=True)
             else:
-                 st.warning(f"Section {section_name_str} generation returned empty or invalid data.")
-                 report_sections.append(f"## {section_name_str}\n\nError: Failed to generate content (empty/invalid response).\n")
-                 print(f"[App:run_report_generation]     ! {section_name_str} returned empty/invalid.", flush=True)
-                 return None
-        except Exception as e_section:
-             error_msg = f"Error generating {section_name_str}: {e_section}"
-             st.error(error_msg) # Show specific error in UI
-             st.exception(e_section) # Show traceback in UI
-             print(f"[App:run_report_generation]   ! ERROR in {section_name_str}: {e_section}", flush=True)
-             traceback.print_exc()
-             report_sections.append(f"## {section_name_str}\n\nError generating content for this section: {e_section}\n")
-             return None
-    # --- End Helper ---
+                st.warning(f"⚠️ Consistency Check Note for {ticker_symbol}: Could not fully verify FVE/Rating consistency as Section 1 values were not clearly parsed (FVE: {parsed_fve_s1}, Rating: {parsed_rating_s1}). This might indicate an issue with Section 1 generation or parsing logic.")
+                print(f"[App] Consistency CHECK NOTE for {ticker_symbol}: S1 FVE/Rating not parsed.", flush=True)
 
-    # --- Check Required Modules Loaded Before Calling ---
-    if not MODULES_LOADED: # Redundant check, but safe
-         st.error("Cannot generate sections because code modules failed to load.")
-         return
+        else: # Handles cases like "No data found" or empty/None report
+            st.warning(f"No report could be generated for {ticker_symbol}. This might be due to an invalid ticker, no data available, or an internal error. Please check the ticker and try again. If the issue persists, the ticker might not be supported or there may be an issue with data fetching.")
+            if final_report_md: # If there's any message (like "No data found") show it.
+                st.markdown("---")
+                st.markdown(final_report_md)
+            print(f"[App] No report generated or 'No data found' for {ticker_symbol}. Message: {final_report_md}", flush=True)
 
-    # --- Section 1 & Parse ---
-    if hasattr(report_generator, 'generate_section_1_exec_summary'):
-        section_1_output = generate_and_append(
-            report_generator.generate_section_1_exec_summary, "Section 1: Executive Summary",
-            ticker=ticker_symbol, company_info=company_info, quote_data=quote_data,
-            llm_handler_generate=llm_handler.generate_text
-        )
-        if section_1_output and "Error generating content" not in section_1_output:
-            st.write("   - Parsing FVE/Rating from Section 1...")
-            print("[App:run_report_generation]   - Parsing S1...", flush=True)
-            try:
-                fve_match = re.search(r"(?:Fair\sValue\sEstimate|FVE)\s*[:\-]?\s*\$?([\d,]+\.\d{2})\b", section_1_output, re.IGNORECASE)
-                rating_match = re.search(r"(?:Stock\sRating|Recommendation|Rating)\s*[:\-]?\s*(\b(?:Buy|Hold|Sell|Neutral|Outperform|Underperform|Accumulate|Reduce|Strong\sBuy|Moderate\sBuy)\b)", section_1_output, re.IGNORECASE | re.MULTILINE)
-                if fve_match:
-                    try:
-                        parsed_fve = float(fve_match.group(1).replace(',', ''))
-                        st.write(f"     ✓ Parsed FVE: {parsed_fve}")
-                        print(f"[App:run_report_generation]     ✓ Parsed FVE: {parsed_fve}", flush=True)
-                    except ValueError:
-                        st.warning("     - Found FVE pattern but failed to convert number.")
-                        print(f"[App:run_report_generation] FVE conversion error. Match: {fve_match.group(1)}", flush=True)
-                else:
-                     st.warning("     - Could not parse FVE from Section 1.")
-                     print(f"[App:run_report_generation] FVE not found in S1.", flush=True)
-                if rating_match:
-                    parsed_rating = rating_match.group(1).strip().capitalize()
-                    st.write(f"     ✓ Parsed Rating: {parsed_rating}")
-                    print(f"[App:run_report_generation]     ✓ Parsed Rating: {parsed_rating}", flush=True)
-                else:
-                     st.warning("     - Could not parse Rating from Section 1.")
-                     print(f"[App:run_report_generation] Rating not found in S1.", flush=True)
-            except Exception as parse_e:
-                st.warning(f"     - Error during parsing Section 1: {parse_e}")
-                print(f"[App:run_report_generation] S1 parsing error: {parse_e}", flush=True)
-                traceback.print_exc()
+
+    except Exception as e:
+        st.error(f"An unexpected error occurred during report generation for {ticker_symbol}: {e}")
+        # log the full traceback to the console for debugging in SCC logs
+        print(f"[App] EXCEPTION during report generation for {ticker_symbol}: {e}\n{traceback.format_exc()}", flush=True)
+        # Optionally, provide a more user-friendly message if you don't want to expose full exception to UI
+        # st.error("An unexpected critical error occurred. Please try again later or contact support if the issue persists.")
+
+# --- User Input and Trigger ---
+print("[App] Setting up user input fields.", flush=True)
+ticker_input = st.text_input("Enter Stock Ticker (e.g., AAPL, MSFT, GOOG):", "").strip().upper()
+
+if st.button("Generate Report"):
+    if ticker_input and local_modules_loaded and 'report_generator_instance' in globals() and report_generator_instance is not None:
+        print(f"[App] 'Generate Report' button clicked for ticker: {ticker_input}", flush=True)
+        run_report_generation(ticker_input)
+    elif not ticker_input:
+        st.warning("Please enter a stock ticker.")
+        print("[App] 'Generate Report' button clicked, but no ticker entered.", flush=True)
     else:
-         print("[App:run_report_generation] generate_section_1 function missing.")
+        # This case covers if modules didn't load or report_generator_instance isn't ready
+        st.error("Application is not fully initialized. Cannot generate report. Please check logs.")
+        print("[App] 'Generate Report' button clicked, but app not fully initialized (modules/generator).", flush=True)
 
-
-    # --- Sections 2-8 ---
-    section_generators = [
-        ("generate_section_2_business_description", "Section 2: Business Description", {"ticker": ticker_symbol, "company_info": company_info, "llm_handler_generate": llm_handler.generate_text}),
-        ("generate_section_3_strategy_outlook", "Section 3: Strategy & Outlook", {"ticker": ticker_symbol, "company_info": company_info, "news": news, "llm_handler_generate": llm_handler.generate_text}),
-        ("generate_section_4_economic_moat", "Section 4: Economic Moat", {"ticker": ticker_symbol, "company_info": company_info, "llm_handler_generate": llm_handler.generate_text}),
-        ("generate_section_5_financial_analysis", "Section 5: Financial Analysis", {"ticker": ticker_symbol, "company_info": company_info, "financial_summary": financial_summary, "news": news, "llm_handler_generate": llm_handler.generate_text}),
-        ("generate_section_6_valuation", "Section 6: Valuation Analysis", {"ticker": ticker_symbol, "company_info": company_info, "quote_data": quote_data, "llm_handler_generate": llm_handler.generate_text}),
-        ("generate_section_7_risk_uncertainty", "Section 7: Risk Assessment", {"ticker": ticker_symbol, "company_info": company_info, "news": news, "llm_handler_generate": llm_handler.generate_text}),
-        ("generate_section_8_bulls_bears", "Section 8: Bulls vs Bears", {"ticker": ticker_symbol, "company_info": company_info, "quote_data": quote_data, "financial_summary": financial_summary, "news": news, "llm_handler_generate": llm_handler.generate_text}),
-    ]
-    for func_name, title, kwargs_for_func in section_generators:
-        if hasattr(report_generator, func_name):
-            generate_and_append(getattr(report_generator, func_name), title, **kwargs_for_func)
-        else:
-            st.error(f"{func_name} not found. Please check report_generator.py.")
-            report_sections.append(f"## {title}\n\nError: Report generation function missing.\n")
-            print(f"[App:run_report_generation] Report generator function {func_name} missing.")
-
-    # --- Section 9 ---
-    if hasattr(report_generator, 'generate_section_9_conclusion_recommendation'):
-        generate_and_append(
-            report_generator.generate_section_9_conclusion_recommendation, "Section 9: Conclusion",
-            ticker=ticker_symbol, company_info=company_info, quote_data=quote_data,
-            llm_handler_generate=llm_handler.generate_text,
-            fve_value=parsed_fve,
-            rating_value=parsed_rating
-        )
-    else:
-         print("[App:run_report_generation] generate_section_9 function missing.")
-
-
-    # --- Section 10 ---
-    if hasattr(report_generator, 'generate_section_10_references'):
-        generate_and_append(report_generator.generate_section_10_references, "Section 10: References")
-    else:
-         print("[App:run_report_generation] generate_section_10 function missing.")
-
-
-    # 4. Assemble Report
-    st.write("Step 4: Assembling final report...")
-    print("\n[App:run_report_generation] Assembling report...", flush=True)
-    final_report_markdown = None
-    try:
-        if not hasattr(report_generator, 'assemble_report'):
-            st.error("assemble_report function not found. Please check report_generator.py.")
-            error_title_md = f"# REPORT ASSEMBLY FAILED: {company_name} ({ticker_symbol})"
-            error_body_md = "\n\n**Error:** `assemble_report` function is missing from `report_generator.py`.\n\n"
-            if report_sections:
-                error_body_md += "Partial sections generated:\n\n---\n\n" + "\n\n---\n\n".join(s for s in report_sections if s)
-            final_report_markdown = error_title_md + error_body_md
-            print("[App:run_report_generation] assemble_report function missing.")
-        elif report_sections:
-            final_report_markdown = report_generator.assemble_report(
-                ticker=ticker_symbol,
-                company_name=company_name,
-                all_sections=report_sections
-            )
-            st.write("   ✓ Report Assembled")
-            print("[App:run_report_generation]   ✓ Report Assembled.", flush=True)
-        else:
-             st.error("No report sections were successfully generated. Cannot assemble report.")
-             print("[App:run_report_generation] No sections to assemble.", flush=True)
-             return
-    except Exception as assemble_e:
-        st.error(f"Error assembling final report: {assemble_e}")
-        print(f"[App:run_report_generation] Error assembling report: {assemble_e}", flush=True)
-        traceback.print_exc()
-        partial_report_content = "\n\n---\n\n".join(s for s in report_sections if s)
-        final_report_markdown = f"# PARTIAL REPORT: {company_name} ({ticker_symbol})\n\n**Error during final assembly:** {assemble_e}\n\n{partial_report_content}"
-
-    # 5. Display Report
-    print("[App:run_report_generation] Displaying report...", flush=True)
-    if final_report_markdown:
-         st.success("Report generation complete!")
-         st.markdown("---")
-         st.markdown(final_report_markdown, unsafe_allow_html=False)
-         print("[App:run_report_generation] Report displayed in UI.", flush=True)
-    else:
-         st.error("Failed to generate or assemble the final report. Check logs for details.")
-         print("[App:run_report_generation] Final markdown is None or empty.", flush=True)
-    # --- End of run_report_generation(ticker_symbol) body ---
-
-
-# --- UI Input and Trigger ---
-# This block should only execute if modules loaded successfully.
-if MODULES_LOADED:
-    print("[App] Setting up Streamlit input elements.", flush=True) # Confirm UI setup proceeds
-    if 'ticker_input' not in st.session_state:
-        st.session_state.ticker_input = ""
-
-    ticker = st.text_input(
-        "Enter US Stock Ticker Symbol:",
-        value=st.session_state.ticker_input,
-        placeholder="e.g., MSFT, NVDA, AAPL",
-        help="Enter a ticker like 'GOOGL', 'AAPL', etc."
-        ).strip().upper()
-    st.session_state.ticker_input = ticker
-
-    generate_button = st.button("Generate Report", type="primary") # No need for disabled check here if protected by MODULES_LOADED
-
-    if generate_button:
-        if ticker:
-            print(f"[App] 'Generate Report' button clicked for ticker: {ticker}", flush=True)
-            # Clear previous report area (optional)
-            # Find a way to target the report output area if needed, or just let it overwrite
-            with st.spinner(f'Generating report for {ticker}... Please wait. This may take 1-2 minutes.'):
-                try:
-                    run_report_generation(ticker)
-                except Exception as e: # Catch errors within the generation call itself
-                     st.error(f"An unexpected error occurred during the report generation process for {ticker}:")
-                     st.exception(e)
-                     print(f"[App] Error during run_report_generation call for {ticker}: {e}", flush=True)
-                     traceback.print_exc()
-        else:
-            st.warning("Please enter a stock ticker symbol.", icon="⚠️")
-            print("[App] 'Generate Report' button clicked, but no ticker symbol was entered.", flush=True)
-
-    st.markdown("---")
-    st.caption("Powered by Google Gemini & Yahoo Finance data. Developed in Google Cloud Shell. Deployed on Streamlit Community Cloud.")
-
-print("[App] End of app.py execution.", flush=True) # Add a final print
-sys.stdout.flush()
+print("[App] End of app.py execution (initial run or after interactions).", flush=True)
