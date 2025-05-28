@@ -2,319 +2,240 @@
 import streamlit as st
 import os
 import sys
-from dotenv import load_dotenv # For local .env loading
+from dotenv import load_dotenv
 import traceback
-import logging # For more structured logging later if needed
-import re # For parsing FVE/Rating
+import re 
 
-# --- Streamlit Page Configuration (MUST BE THE FIRST STREAMLIT COMMAND) ---
+# --- Streamlit Page Configuration ---
 try:
     st.set_page_config(page_title="AI Wall Street Analyst", layout="wide")
 except st.errors.StreamlitAPIException as e:
-    if "set_page_config() has already been called" in str(e):
-        pass
-    else:
-        print(f"[App] Error setting page config: {e}", flush=True)
+    if "set_page_config() has already been called" in str(e): pass
+    else: 
+        print(f"[App Critical] Error setting page config: {e}", flush=True)
+        st.error("Page configuration error. Please refresh.") # User-facing
+        st.stop() # Stop execution if page config fails fundamentally
 
 print("[App] VERY START of app.py execution...", flush=True)
-print("[App] Standard library imports completed.", flush=True)
 
-print("[App] Attempting to load .env file...", flush=True)
+# --- Load .env ---
+# Ensure load_dotenv is called early, outside any conditional Streamlit logic if possible
+# for consistent environment variable loading.
+env_loaded_message = "[App] .env file not found or empty. Relying on environment variables or Streamlit secrets."
 try:
-    env_path = load_dotenv(verbose=True, override=True)
-    if env_path:
-        print(f"[App] .env file loaded successfully from: {env_path}", flush=True)
-    else:
-        print("[App] .env file not found or is empty. Relying on environment variables or Streamlit secrets.", flush=True)
+    if load_dotenv(verbose=True, override=True):
+        env_loaded_message = "[App] .env file processed."
+    print(env_loaded_message, flush=True)
 except Exception as e:
-    print(f"[App] Error attempting to load .env file: {e}. Relying on environment variables or Streamlit secrets.", flush=True)
+    print(f"[App] Error attempting to load .env file: {e}. {env_loaded_message}", flush=True)
 
-# --- Import Local Modules (AFTER st.set_page_config) ---
+
+# --- Import Local Modules ---
 print("[App] Attempting to import local modules...", flush=True)
-local_modules_loaded = False
-try:
-    from config_loader import get_api_key
-    import llm_handler # Import the module itself
-    from data_fetcher import StockDataFetcher # CORRECTED IMPORT
-    import report_generator as rg_funcs # Import the module with an alias
+llm_handler_instance = None # Initialize globally for app session
+fetcher_instance_cache = {} # Simple cache for StockDataFetcher instances per ticker
 
-    local_modules_loaded = True
+try:
+    from llm_handler import LLMHandler 
+    from data_fetcher import StockDataFetcher
+    import report_generator as rg_funcs
+    from fve_agent import FVEAgent
+    # from app_utils import parse_rating_from_s1_text # IDEAL: if you move parser to utils
     print("[App] Successfully imported local modules.", flush=True)
 except ImportError as e:
     print(f"[App] FATAL ERROR importing local modules: {e}", flush=True)
-    try:
-        st.error(f"Critical Error: Could not import necessary Python modules. Application cannot start. Details: {e}")
-    except NameError: pass
-    traceback.print_exc()
-    if 'st' in globals() and hasattr(st, 'stop'): st.stop()
-    else: sys.exit(1)
+    st.error(f"Critical Application Error: Could not import necessary Python modules. Application cannot start. Details: {e}")
+    traceback.print_exc(); st.stop()
 
-# --- Configuration & Initialization (AFTER st.set_page_config and local imports) ---
-print(f"[App] Local modules loaded status: {local_modules_loaded}", flush=True)
+# --- Configuration & Global Initialization ---
+# These could be moved to a dedicated config.py later
+APP_LLM_MODEL = os.getenv("APP_LLM_MODEL", "gemini-1.5-flash-latest") # Allow override via env
+APP_RFR = float(os.getenv("APP_RFR", "0.045"))
+APP_ERP = float(os.getenv("APP_ERP", "0.045"))
+APP_STAGE1_YEARS = int(os.getenv("APP_STAGE1_YEARS", "5"))
+APP_DEBUG_MODE = os.getenv("APP_DEBUG_MODE", "True").lower() == "true" # Read as bool
 
-# We will initialize StockDataFetcher inside the orchestration function once we have the ticker
+print(f"[App Config] LLM Model: {APP_LLM_MODEL}, RFR: {APP_RFR}, ERP: {APP_ERP}, Stage1Yrs: {APP_STAGE1_YEARS}, Debug: {APP_DEBUG_MODE}", flush=True)
 
-if local_modules_loaded:
-    print("[App] Attempting to retrieve API key...", flush=True)
-    api_key = get_api_key("GOOGLE_API_KEY")
-
-    if not api_key:
-        st.error("🔴 CRITICAL ERROR: GOOGLE_API_KEY not found. Please set it in Streamlit secrets or .env file. Application cannot proceed.")
-        print("🔴 CRITICAL ERROR in app.py: GOOGLE_API_KEY not found. Halting.", flush=True)
+try:
+    print("[App] Initializing LLMHandler instance globally for the app session...", flush=True)
+    llm_handler_instance = LLMHandler(model_name=APP_LLM_MODEL) # API key loaded within LLMHandler
+    if not llm_handler_instance.is_configured() or not llm_handler_instance.model:
+        # LLMHandler __init__ should print specifics if API key failed
+        st.error("🔴 CRITICAL ERROR: LLM Handler could not be configured or model not initialized. Please check API key and application logs. The application cannot proceed.")
+        print("🔴 CRITICAL ERROR in app.py: LLMHandler global instance setup failed. Halting.", flush=True)
         st.stop()
-    else:
-        print("[App] API Key retrieved successfully.", flush=True)
-        print("[App] Attempting to configure LLM via llm_handler.configure_llm()...", flush=True)
-        if llm_handler.configure_llm():
-            print("[App] LLM configured successfully via llm_handler.configure_llm().", flush=True)
-            # StockDataFetcher will be initialized later, when ticker is available
-        else:
-            print("[App] FATAL ERROR: Failed to configure LLM. Application cannot proceed.", flush=True)
-            st.error("Critical Error: LLM configuration failed. Please check API key and logs. Application cannot proceed.")
-            st.stop()
-else:
-    print("[App] Halting due to failure in loading local modules.", flush=True)
-    if 'st' in globals() and hasattr(st, 'stop'): st.stop()
-    else: sys.exit(1)
+    print("[App] LLMHandler global instance ready.", flush=True)
+except Exception as e:
+    st.error(f"🔴 CRITICAL ERROR during global LLMHandler initialization: {e}. The application cannot proceed.")
+    print(f"🔴 CRITICAL ERROR in app.py: LLMHandler global init exception: {e}\n{traceback.format_exc()}", flush=True)
+    st.stop()
 
+# --- Main App UI Setup ---
+st.title(f"📈 AI Wall Street Analyst (v1.5 - FVE Agent)") 
+st.markdown("Welcome! This application uses AI to generate a stock analysis report, featuring an independently calculated Fair Value Estimate (FVE). **Enter a valid U.S. stock ticker symbol and click \"Generate Report\".**")
+st.warning("**⚠️ Disclaimer:** Proof-of-Concept. NOT financial advice. AI-generated content may contain inaccuracies. Data from Yahoo Finance. Always do your own research.")
 
-# --- Main App UI Setup (AFTER st.set_page_config) ---
-st.title("📈 AI Wall Street Analyst (v1.0 POC)")
-print("[App] Streamlit title SET.", flush=True)
-
-st.markdown("""
-Welcome to the AI Wall Street Analyst! This Proof-of-Concept (POC) application demonstrates
-the capability to generate a basic stock analysis report using AI.
-
-**Enter a valid U.S. stock ticker symbol below and click "Generate Report".**
-""")
-
-st.warning("""
-**⚠️ Disclaimer:**
-*   This application is a Proof-of-Concept and for demonstration purposes only.
-*   The information provided is AI-generated and may contain inaccuracies or omissions.
-*   Data is sourced from Yahoo Finance and may have its own limitations or delays.
-*   **This is NOT financial advice. Always do your own thorough research or consult with a qualified financial advisor before making any investment decisions.**
-""")
-print("[App] Disclaimers displayed.", flush=True)
-
-
-def parse_fve_and_rating_from_s1(section_1_text: str) -> tuple[float | str | None, str | None]:
-    print(f"[App Parser] Attempting to parse FVE/Rating from S1 text (first 300 chars):\n'''{section_1_text[:300]}'''") # Log more for context
-    fve_value = None
-    rating_value = None
-
-    # FVE Parsing:
-    # Pattern to match "Fair Value Estimate (FVE): $150.00" or "FVE: $150.00" or "Fair Value Estimate: $150.00"
-    # It also handles numbers with or without commas, and with or without cents.
-    fve_pattern_text = r"(?:Fair Value Estimate(?:\s*\(FVE\))?|FVE)\s*:\s*\$?((?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?)"
-    # Explanation of the number part: ((?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?)
-    # 1. (?:\d{1,3}(?:,\d{3})*|\d+)  -- Matches whole numbers:
-    #    - \d{1,3}(?:,\d{3})*  -- Like 1,234,567 or 123
-    #    - |\d+                 -- Or simple numbers like 12345
-    # 2. (?:\.\d+)?                  -- Optionally matches decimal part like .00 or .5
-
-    fve_match = re.search(fve_pattern_text, section_1_text, re.IGNORECASE)
-    if fve_match:
-        fve_str = fve_match.group(1).replace(',', '') # Get captured number string, remove commas
-        try:
-            fve_value = float(fve_str)
-            print(f"[App Parser] Parsed FVE (float): {fve_value}")
-        except ValueError:
-            fve_value = fve_str # Store as string if not convertible (e.g., if LLM includes non-numeric chars)
-            print(f"[App Parser] Parsed FVE (string, could not convert to float): '{fve_value}'")
-    else:
-        # Fallback FVE search if the primary one fails - more general search for a dollar amount near "Fair Value"
-        fve_fallback_match = re.search(r"Fair Value.*?\$?((?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?)", section_1_text, re.IGNORECASE)
-        if fve_fallback_match:
-            fve_str = fve_fallback_match.group(1).replace(',', '')
-            try:
-                fve_value = float(fve_str)
-                print(f"[App Parser] Parsed FVE (float - fallback): {fve_value}")
-            except ValueError:
-                fve_value = fve_str
-                print(f"[App Parser] Parsed FVE (string - fallback, could not convert to float): '{fve_value}'")
-
-    # Rating Parsing (seems to be working, but let's keep it robust)
-    rating_keywords = r"(?:Concise Stock Rating|Investment Recommendation|Rating|Recommendation)\s*[:\-is\s]*"
-    common_ratings_capture = r"(Strong Buy|Buy|Accumulate|Outperform|Overweight|Hold|Neutral|Equal-weight|Market Perform|Reduce|Underperform|Sell|Strong Sell)"
-
-    # Pattern 1: Keyword followed by rating
-    rating_match_1 = re.search(rating_keywords + common_ratings_capture, section_1_text, re.IGNORECASE)
-    if rating_match_1:
-        rating_value = rating_match_1.group(1).strip().title() # .group(1) is the rating itself
-        print(f"[App Parser] Parsed Rating (Pattern 1): '{rating_value}'")
-    else:
-        # Pattern 2: Rating mentioned broadly (less precise, used as fallback)
-        # Ensure it's a whole word match for the rating.
-        rating_match_2 = re.search(r"\b" + common_ratings_capture + r"\b", section_1_text, re.IGNORECASE)
-        if rating_match_2:
-            # Check if this rating isn't part of a sentence that negates it, e.g., "Not a Buy"
-            # This requires more complex context checking, for now, we accept it.
-            rating_value = rating_match_2.group(1).strip().title()
-            print(f"[App Parser] Parsed Rating (Pattern 2 - broad): '{rating_value}'")
-
-    if not fve_value: print("[App Parser] FVE not found or parsed from S1 after attempts.")
-    if not rating_value: print("[App Parser] Rating not found or parsed from S1 after attempts.")
-    return fve_value, rating_value
-
+# --- Helper Function for parsing rating (from test_full_report_flow.py) ---
+# TODO (V1.6): Move this to a shared app_utils.py module
+def parse_rating_from_s1_text_in_app(section_1_text: str) -> str | None:
+    if APP_DEBUG_MODE: print(f"[App Parser] Attempting to parse Rating from S1 (first 300 chars):\n'''{section_1_text[:300]}'''")
+    rating_value = None; patterns = [r"(?:Overall Rating|Investment Recommendation|Stock Rating)\s*[:\-is\s]*\s*(Strong Buy|Buy|Accumulate|Outperform|Overweight|Hold|Neutral|Equal-weight|Market Perform|Reduce|Underperform|Sell|Strong Sell)\b", r"\b(Strong Buy|Buy|Accumulate|Outperform|Overweight|Hold|Neutral|Equal-weight|Market Perform|Reduce|Underperform|Sell|Strong Sell)\b"]
+    for pattern in patterns:
+        match = re.search(pattern, section_1_text, re.IGNORECASE)
+        if match: rating_value = (match.group(1) or match.group(0)).strip().title(); break 
+    if not rating_value and APP_DEBUG_MODE: print("[App Parser] Rating not found or parsed from S1.")
+    return rating_value
 
 # --- Report Generation Orchestration ---
 def run_report_generation_orchestration(ticker_symbol: str):
-    # StockDataFetcher is now initialized here
-    print(f"[App Orchestration] Report generation requested for ticker: {ticker_symbol}", flush=True)
-    all_sections_content = []
-    parsed_fve_s1 = None
-    parsed_rating_s1 = None
+    print(f"[App Orchestration] Report generation process started for: {ticker_symbol.upper()}", flush=True)
+    
+    if not llm_handler_instance or not llm_handler_instance.is_configured() or not llm_handler_instance.model:
+        st.error("LLM Service is not available. Cannot generate report. Please check logs or API key setup.")
+        return
 
     try:
-        with st.spinner(f"Initializing data fetcher and generating report for {ticker_symbol}... This may take a minute or two..."):
-            print(f"[App Orchestration] Initializing StockDataFetcher for {ticker_symbol}...")
+        with st.spinner(f"Hold on! Analyzing {ticker_symbol.upper()} and crafting your report... This can take 1-2 minutes..."):
+            # --- 1. Data Fetching ---
+            fetcher = None; fve_input_data = None; company_info_for_sections = None
+            if APP_DEBUG_MODE: print(f"[App Orchestration] Attempting to fetch data for {ticker_symbol}...")
             try:
-                fetcher = StockDataFetcher(ticker_symbol) # INSTANTIATE HERE
-                print(f"[App Orchestration] StockDataFetcher initialized for {ticker_symbol}.")
-            except ValueError as ve_data_fetcher: # Catch specific ValueError from StockDataFetcher constructor
-                st.error(f"Error initializing data for {ticker_symbol}: {ve_data_fetcher}")
-                print(f"[App Orchestration] StockDataFetcher init error: {ve_data_fetcher}")
-                return # Stop if fetcher cannot be initialized (e.g., invalid ticker)
-            except Exception as e_data_fetcher: # Catch any other exception during fetcher init
-                st.error(f"An unexpected error occurred while setting up data for {ticker_symbol}: {e_data_fetcher}")
-                print(f"[App Orchestration] StockDataFetcher generic init error: {e_data_fetcher}\n{traceback.format_exc()}")
+                # Using a simple cache for fetcher to avoid re-init for the same ticker if app reruns quickly
+                if ticker_symbol not in fetcher_instance_cache:
+                    fetcher_instance_cache[ticker_symbol] = StockDataFetcher(ticker_symbol, historical_years=APP_STAGE1_YEARS)
+                fetcher = fetcher_instance_cache[ticker_symbol]
+                
+                fve_input_data = fetcher.get_fve_inputs() # Comprehensive data for FVEAgent
+                company_info_for_sections = fetcher.get_company_info() # For descriptive sections
+
+                if not fve_input_data or not fve_input_data.get('companyName'):
+                    st.error(f"Failed to fetch sufficient FVE input data (e.g., company name) for {ticker_symbol}. Please try another ticker or check data source.")
+                    return
+                if not company_info_for_sections or not company_info_for_sections.get('longBusinessSummary'):
+                    st.warning(f"Could not fetch detailed company summary for {ticker_symbol}. Business Description (Section 2) may be brief or unavailable.")
+                if APP_DEBUG_MODE: print(f"[App Orchestration] Data fetched for {ticker_symbol}.")
+
+            except ValueError as ve_data_fetcher: # From StockDataFetcher __init__ typically for bad tickers
+                st.error(f"Data Error for {ticker_symbol}: {ve_data_fetcher}. Is the ticker valid and listed on Yahoo Finance?")
                 return
+            except Exception as e_data_fetcher:
+                st.error(f"An unexpected error occurred while fetching data for {ticker_symbol}: {e_data_fetcher}")
+                traceback.print_exc(); return
 
-            print(f"[App Orchestration] Fetching data for {ticker_symbol} using fetcher instance...")
-            company_info = fetcher.get_company_info()
-            quote_data = fetcher.get_quote_data()
-            financial_summary = fetcher.get_financial_summary()
-            news = fetcher.get_news()
-            company_name_for_title = company_info.get('longName', ticker_symbol)
+            company_name_for_title = fve_input_data.get('companyName', ticker_symbol)
+            current_price = fve_input_data.get('currentPrice')
 
-            # Check if essential data could be fetched after successful fetcher initialization
-            if not company_info or not company_info.get('longName') or quote_data.get('currentPrice') is None :
-                st.error(f"Failed to fetch essential data for {ticker_symbol} (e.g., name, price) even after fetcher initialization. The ticker might be valid but data is incomplete on yfinance. Cannot generate full report.")
-                print(f"[App Orchestration] Essential data (name/price) missing post-fetch for {ticker_symbol}.")
-                # Optionally display any partial data available:
-                if company_info: st.json({"company_info_partial": company_info})
-                if quote_data: st.json({"quote_data_partial": quote_data})
-                return
+            # --- 2. Run FVE Agent ---
+            if APP_DEBUG_MODE: print(f"[App Orchestration] Instantiating and running FVEAgent for {ticker_symbol}...")
+            fve_agent_instance = FVEAgent(
+                llm_generate_text_func=llm_handler_instance.generate_text,
+                rfr=APP_RFR, erp=APP_ERP, stage1_years=APP_STAGE1_YEARS,
+                debug_mode=APP_DEBUG_MODE
+            )
+            agent_fve, agent_methodology_text = fve_agent_instance.run_valuation_process(fve_input_data)
+            if APP_DEBUG_MODE: print(f"[App Orchestration] FVEAgent Results: FVE={agent_fve}, Method='{fve_agent_instance.method_used}'")
 
-            print(f"[App Orchestration] Data fetched. Proceeding to generate sections...")
+            # --- Prepare other data for V1.0 rg_funcs compatibility ---
+            quote_data_for_rg = fve_input_data
+            news_for_rg = fve_input_data.get('news', [])
+            hist_fin_for_rg = fve_input_data.get('historical_financials', {})
+            financial_summary_for_rg_v1_style = {
+                "latest_annual_earnings": hist_fin_for_rg.get('netIncome_list', [None])[0],
+                "latest_annual_revenue": hist_fin_for_rg.get('totalRevenue_list', [None])[0],
+                "financials_year": hist_fin_for_rg.get('years', ["N/A"])[0]
+            }
+            
+            all_sections_content = []
+            st.info("Generating report sections...") # Single spinner, individual info messages
 
-            # Section 1: Executive Summary
+            # --- 3. Generate Report Sections ---
+            print("[App Orchestration] Generating Section 1: Executive Summary...")
             s1_content = rg_funcs.generate_section_1_exec_summary(
-                ticker_symbol, company_info, quote_data, llm_handler.generate_text
+                ticker_symbol, company_info_for_sections, quote_data_for_rg, llm_handler_instance.generate_text,
+                current_stock_price=current_price,             
+                calculated_fve_from_agent=agent_fve,         
+                fve_method_used_by_agent=fve_agent_instance.method_used 
             )
             all_sections_content.append(s1_content)
-            parsed_fve_s1, parsed_rating_s1 = parse_fve_and_rating_from_s1(s1_content)
-            print(f"[App Orchestration] Section 1 generated. Parsed FVE: {parsed_fve_s1}, Parsed Rating: {parsed_rating_s1}")
+            parsed_rating_s1 = parse_rating_from_s1_text_in_app(s1_content) # Use the app's parser
+            print(f"[App Orchestration] Section 1 generated. Parsed Rating: {parsed_rating_s1}")
 
-            # Section 2: Business Description
-            s2_content = rg_funcs.generate_section_2_business_description(
-                ticker_symbol, company_info, llm_handler.generate_text
-            )
-            all_sections_content.append(s2_content)
-            print(f"[App Orchestration] Section 2 generated.")
+            methodology_header = "\n## Valuation Methodology & Assumptions\n" # Clearer header
+            all_sections_content.append(f"{methodology_header}\n{agent_methodology_text}\n\n---")
+            print(f"[App Orchestration] Added FVE Agent Methodology section to report content.")
 
-            # Section 3: Business Strategy & Outlook
-            s3_content = rg_funcs.generate_section_3_strategy_outlook(
-                ticker_symbol, company_info, news, llm_handler.generate_text
-            )
-            all_sections_content.append(s3_content)
-            print(f"[App Orchestration] Section 3 generated.")
+            # Loop for sections 2-8
+            section_gen_map_app = {
+                "2: Business Description": lambda: rg_funcs.generate_section_2_business_description(ticker_symbol, company_info_for_sections, llm_handler_instance.generate_text),
+                "3: Strategy & Outlook": lambda: rg_funcs.generate_section_3_strategy_outlook(ticker_symbol, company_info_for_sections, news_for_rg, llm_handler_instance.generate_text),
+                "4: Economic Moat": lambda: rg_funcs.generate_section_4_economic_moat(ticker_symbol, company_info_for_sections, llm_handler_instance.generate_text),
+                "5: Financial Analysis": lambda: rg_funcs.generate_section_5_financial_analysis(ticker_symbol, company_info_for_sections, financial_summary_for_rg_v1_style, news_for_rg, llm_handler_instance.generate_text),
+                # "6: Valuation Discussion": lambda: rg_funcs.generate_section_6_valuation(ticker_symbol, company_info_for_sections, quote_data_for_rg, llm_handler_instance.generate_text), # DECISION: Keep or remove S6
+                "7: Risk & Uncertainty": lambda: rg_funcs.generate_section_7_risk_uncertainty(ticker_symbol, company_info_for_sections, news_for_rg, llm_handler_instance.generate_text),
+                "8: Bulls Say / Bears Say": lambda: rg_funcs.generate_section_8_bulls_bears(ticker_symbol, company_info_for_sections, quote_data_for_rg, financial_summary_for_rg_v1_style, news_for_rg, llm_handler_instance.generate_text),
+            }
+            # Section 6 Decision Point:
+            # If you want to remove Section 6 for V1.5 because FVE Agent methodology is more detailed:
+            # Just comment out or delete the line for "6: Valuation Discussion" in section_gen_map_app above.
+            # If kept, its prompt should be very general as discussed.
+            # For this example, I've kept it but commented out the call for easy toggling. You might want to keep it for now.
+            if "6: Valuation Discussion" in section_gen_map_app: # Only add if not commented out
+                print("[App Orchestration] Note: Original Section 6 (Valuation Discussion) will be generated.")
+            
+            for section_name, func_call in section_gen_map_app.items():
+                print(f"[App Orchestration] Generating Section {section_name}...")
+                all_sections_content.append(func_call())
 
-            # Section 4: Economic Moat Analysis
-            s4_content = rg_funcs.generate_section_4_economic_moat(
-                ticker_symbol, company_info, llm_handler.generate_text
-            )
-            all_sections_content.append(s4_content)
-            print(f"[App Orchestration] Section 4 generated.")
-
-            # Section 5: Financial Analysis
-            s5_content = rg_funcs.generate_section_5_financial_analysis(
-                ticker_symbol, company_info, financial_summary, news, llm_handler.generate_text
-            )
-            all_sections_content.append(s5_content)
-            print(f"[App Orchestration] Section 5 generated.")
-
-            # Section 6: Valuation Analysis
-            s6_content = rg_funcs.generate_section_6_valuation(
-                ticker_symbol, company_info, quote_data, llm_handler.generate_text
-            )
-            all_sections_content.append(s6_content)
-            print(f"[App Orchestration] Section 6 generated.")
-
-            # Section 7: Risk and Uncertainty Assessment
-            s7_content = rg_funcs.generate_section_7_risk_uncertainty(
-                ticker_symbol, company_info, news, llm_handler.generate_text
-            )
-            all_sections_content.append(s7_content)
-            print(f"[App Orchestration] Section 7 generated.")
-
-            # Section 8: Bulls Say / Bears Say
-            s8_content = rg_funcs.generate_section_8_bulls_bears(
-                ticker_symbol, company_info, quote_data, financial_summary, news, llm_handler.generate_text
-            )
-            all_sections_content.append(s8_content)
-            print(f"[App Orchestration] Section 8 generated.")
-
-            # Section 9: Conclusion & Investment Recommendation
+            print("[App Orchestration] Generating Section 9: Conclusion...")
             s9_content = rg_funcs.generate_section_9_conclusion_recommendation(
-                ticker_symbol, company_info, quote_data, llm_handler.generate_text,
-                fve_value=parsed_fve_s1, rating_value=parsed_rating_s1
+                ticker_symbol, company_info_for_sections, quote_data_for_rg, llm_handler_instance.generate_text,
+                fve_value=agent_fve, rating_value=parsed_rating_s1, fve_method_used=fve_agent_instance.method_used 
             )
             all_sections_content.append(s9_content)
-            print(f"[App Orchestration] Section 9 generated.")
-
-            # Section 10: References
-            s10_content = rg_funcs.generate_section_10_references()
-            all_sections_content.append(s10_content)
-            print(f"[App Orchestration] Section 10 generated.")
-
+            
+            print("[App Orchestration] Generating Section 10: References...")
+            all_sections_content.append(rg_funcs.generate_section_10_references())
+            
             final_report_md = rg_funcs.assemble_report(ticker_symbol, company_name_for_title, all_sections_content)
-            print(f"[App Orchestration] Report assembled for {ticker_symbol}.", flush=True)
+            print(f"[App Orchestration] Report assembled successfully for {ticker_symbol}.", flush=True)
 
-        # Display logic
-        if any("error generating content" in str(section).lower() for section in all_sections_content if isinstance(section, str)) or \
-           any("failed to generate content" in str(section).lower() for section in all_sections_content if isinstance(section, str)):
-            st.error(f"Could not generate a full report for {ticker_symbol}. Some sections encountered issues.")
-            st.markdown("### Generated Report (may be incomplete or contain errors):")
-            st.markdown(final_report_md if 'final_report_md' in locals() else "Report assembly failed.")
-            print(f"[App Orchestration] Error detected in one or more sections for {ticker_symbol}.", flush=True)
-        elif 'final_report_md' in locals() and final_report_md:
-            st.success(f"Report for {ticker_symbol} generated successfully!")
-            st.markdown("---")
-            st.markdown(final_report_md)
-            print(f"[App Orchestration] Report for {ticker_symbol} displayed successfully.", flush=True)
-
-            # Consistency check
-            if parsed_fve_s1 is not None and parsed_rating_s1 is not None:
-                st.info("ℹ️ Consistency Note: Section 1 FVE & Rating values were passed to Section 9 for restatement. Verify actual S9 text for confirmation.")
-                print(f"[App Orchestration] S1 FVE/Rating passed to S9 for {ticker_symbol}.", flush=True)
-            else:
-                st.warning(f"⚠️ Consistency Check Note for {ticker_symbol}: Section 1 FVE/Rating were not clearly parsed. FVE: '{parsed_fve_s1}', Rating: '{parsed_rating_s1}'.")
-                print(f"[App Orchestration] Consistency NOTE for {ticker_symbol}: S1 FVE/Rating not fully parsed.", flush=True)
-        else:
-            st.warning(f"No report content could be generated for {ticker_symbol}, or report assembly failed.")
-            print(f"[App Orchestration] No report content generated for {ticker_symbol}.", flush=True)
-
-    except Exception as e: # Catch-all for the orchestration function itself
-        st.error(f"An unexpected error occurred during report orchestration for {ticker_symbol}: {e}")
-        print(f"[App Orchestration] UNEXPECTED EXCEPTION: {e}\n{traceback.format_exc()}", flush=True)
+        # --- Display Logic ---
+        st.success(f"AI Analyst Report for {company_name_for_title} ({ticker_symbol}) Generated!")
+        st.markdown("---")
+        st.markdown(final_report_md, unsafe_allow_html=True) # unsafe_allow_html might be needed for complex markdown tables from LLM
+            
+    except Exception as e:
+        st.error(f"A critical error occurred during the report generation process for {ticker_symbol}: {e}")
+        print(f"[App Orchestration] UNHANDLED CRITICAL EXCEPTION: {e}\n{traceback.format_exc()}", flush=True)
+        st.markdown("### Report Generation Failed")
+        st.markdown("An unexpected error stopped the report generation. Please check the application logs or try a different ticker. If the issue persists, the service might be temporarily unavailable.")
 
 
 # --- User Input and Trigger ---
 print("[App] Setting up user input fields.", flush=True)
-ticker_input = st.text_input("Enter Stock Ticker (e.g., AAPL, MSFT, GOOG):", key="ticker_input_main").strip().upper()
+# Use session state to keep ticker input if app re-runs due to other interactions
+if 'ticker_input_value' not in st.session_state:
+    st.session_state.ticker_input_value = "MSFT" # Default or last used
 
-if st.button("Generate Report", key="generate_report_button"):
-    if ticker_input and local_modules_loaded: # Basic check
-        print(f"[App] 'Generate Report' button clicked for ticker: {ticker_input}", flush=True)
-        run_report_generation_orchestration(ticker_input)
-    elif not ticker_input:
-        st.warning("Please enter a stock ticker.")
-        print("[App] 'Generate Report' button clicked, but no ticker entered.", flush=True)
-    else: # Should not be hit if local_modules_loaded is true, but good fallback
-        st.error("Application is not fully initialized or ticker is missing. Cannot generate report. Please check logs or enter a ticker.")
-        print("[App] 'Generate Report' button clicked, but app not fully initialized or ticker missing.", flush=True)
+ticker_input_from_user = st.text_input(
+    "Enter Stock Ticker (e.g., AAPL, MSFT):", 
+    value=st.session_state.ticker_input_value,
+    key="ticker_input_main_field"
+).strip().upper()
+st.session_state.ticker_input_value = ticker_input_from_user # Update session state on change
 
-print("[App] End of app.py execution (initial run or after interactions).", flush=True)
+
+if st.button("Generate Full AI Stock Report", key="generate_report_button_main"):
+    if ticker_input_from_user: # Basic check that something is entered
+        if llm_handler_instance and llm_handler_instance.is_configured(): # Check if LLM is ready
+            print(f"[App Button] 'Generate Report' clicked for ticker: {ticker_input_from_user}", flush=True)
+            run_report_generation_orchestration(ticker_input_from_user)
+        else:
+            st.error("LLM Service not ready. Please check API key and logs.")
+            print("[App Button] LLM not ready when button clicked.", flush=True)
+    else:
+        st.warning("Please enter a stock ticker symbol to generate a report.")
+        print("[App Button] No ticker entered.", flush=True)
+
+print("[App] Reached end of app.py script execution or awaiting interaction.", flush=True)

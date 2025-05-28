@@ -1,118 +1,123 @@
-# This file handles interactions with the LLM (Google Gemini).
+# llm_handler.py
+# This file handles interactions with the LLM (Google Gemini) using a class structure.
 
+import os
 import google.generativeai as genai
-import sys # To check if config_loader was imported correctly
+from dotenv import load_dotenv
 
-# Attempt to import the function from the config_loader module we created
-try:
-    from config_loader import get_api_key
-except ImportError:
-    print("Error: Could not import 'get_api_key' from config_loader.")
-    print("Ensure 'config_loader.py' exists in the same directory and the cell creating it was run.")
-    # Define a dummy function to prevent NameError later, but it won't work
-    def get_api_key(key_name: str) -> None:
-        print("Error: get_api_key function is not available due to import failure.")
-        return None
+class LLMHandler:
+    _is_configured = False 
 
-# Global variable to track configuration status
-_is_configured = False
+    def __init__(self, model_name: str = "gemini-1.5-flash-latest", api_key: str | None = None):
+        self.model_name = model_name
+        self.model = None 
 
-def configure_llm() -> bool:
-    """
-    Configures the Google Generative AI client using the API key
-    retrieved from Colab Secrets via config_loader.
+        if not LLMHandler._is_configured:
+            current_api_key = api_key
+            if not current_api_key:
+                # Standardize to GEMINI_API_KEY from .env first for consistency
+                load_dotenv() # Ensure .env is loaded if called from anywhere
+                current_api_key = os.getenv("GEMINI_API_KEY")
+                
+            if not current_api_key: # Fallback to GOOGLE_API_KEY if GEMINI_API_KEY isn't found
+                current_api_key = os.getenv("GOOGLE_API_KEY") # For V1.0 config_loader style if it set env var
 
-    Returns:
-        True if configuration is successful, False otherwise.
-    """
-    global _is_configured
-    if _is_configured:
-        print("Gemini is already configured.")
-        return True
+            if not current_api_key: # Fallback to trying config_loader directly
+                try:
+                    from config_loader import get_api_key as cl_get_api_key
+                    current_api_key = cl_get_api_key('GEMINI_API_KEY') # Prefer GEMINI_API_KEY
+                    if not current_api_key:
+                         current_api_key = cl_get_api_key('GOOGLE_API_KEY') # Then try GOOGLE_API_KEY
+                    print("LLMHandler Info: API key loaded via config_loader.")
+                except ImportError:
+                    # print("LLMHandler Warning: config_loader not found or failed to load key.")
+                    pass # Pass silently if config_loader isn't there or fails
 
-    print("Attempting to configure Gemini...")
-    api_key = get_api_key('GOOGLE_API_KEY')
+            if current_api_key:
+                self._configure_with_key(current_api_key)
+            else:
+                print("LLMHandler Error: API key not provided and not found. LLM will not be configured.")
+        
+        if LLMHandler._is_configured:
+            try:
+                self.model = genai.GenerativeModel(self.model_name)
+                if self.model:
+                    # print(f"LLMHandler: Model '{self.model_name}' initialized successfully for this instance.")
+                    pass
+            except Exception as e:
+                print(f"LLMHandler Error: Failed to initialize model '{self.model_name}' after configuration: {e}")
+                self.model = None
 
-    if api_key:
-        try:
-            genai.configure(api_key=api_key)
-            print("Gemini configured successfully.")
-            _is_configured = True
+    def _configure_with_key(self, api_key: str) -> bool:
+        if LLMHandler._is_configured:
             return True
-        except Exception as e:
-            print(f"Error configuring Gemini: {e}")
-            _is_configured = False
-            return False
-    else:
-        print("Configuration failed: API Key 'GOOGLE_API_KEY' not found or retrieval failed.")
-        _is_configured = False
-        return False
-
-def generate_text(prompt: str, model_name: str = "gemini-1.5-flash") -> str | None:
-    """
-    Generates text content using the specified Google Gemini model.
-
-    Assumes that configure_llm() has been successfully called beforehand.
-
-    Args:
-        prompt: The text prompt to send to the model.
-        model_name: The name of the Gemini model to use
-                    (e.g., "gemini-1.5-flash", "gemini-1.0-pro").
-
-    Returns:
-        The generated text content as a string, or None if generation fails
-        or if the LLM is not configured.
-    """
-    global _is_configured
-    if not _is_configured:
-        print("Error: LLM is not configured. Please call configure_llm() first.")
-        return None
-
-    print(f"\nAttempting to generate text using model: {model_name}...")
-    try:
-        # Initialize the model (consider generation config for advanced control)
-        model = genai.GenerativeModel(model_name)
-
-        # Generate content
-        response = model.generate_content(prompt)
-
-        # Extract and return the text
-        if response and response.text:
-             print("Text generation successful.")
-             return response.text
-        elif response and hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
-             print(f"Text generation blocked. Reason: {response.prompt_feedback.block_reason}")
-             print(f"Safety Ratings: {response.prompt_feedback.safety_ratings}")
-             return None
+        # print("LLMHandler: Attempting to configure Gemini globally...")
+        if api_key:
+            try:
+                genai.configure(api_key=api_key)
+                print("LLMHandler Info: Gemini configured successfully globally.")
+                LLMHandler._is_configured = True
+                return True
+            except Exception as e:
+                print(f"LLMHandler Error: Error configuring Gemini: {e}")
+                LLMHandler._is_configured = False; return False
         else:
-            print("Text generation failed: Received an empty or unexpected response.")
-            # print("Full Response:", response) # Uncomment for debugging
-            return None
+            print("LLMHandler Error: Configuration failed - API Key was not provided.")
+            LLMHandler._is_configured = False; return False
 
-    except Exception as e:
-        print(f"An error occurred during text generation: {e}")
-        return None
+    def generate_text(self, prompt: str) -> str | None:
+        if not LLMHandler._is_configured: print("LLMHandler Error: LLM not configured globally."); return None
+        if not self.model: print(f"LLMHandler Error: Model '{self.model_name}' not initialized."); return None
+        try:
+            response = self.model.generate_content(prompt)
+            if response and hasattr(response, 'text') and response.text: return response.text
+            elif response and hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
+                print(f"LLMHandler Error: Blocked. Reason: {response.prompt_feedback.block_reason}"); return None
+            else: print("LLMHandler Error: Empty/unexpected response."); return None
+        except Exception as e: print(f"LLMHandler Error during generation: {e}"); return None
 
-# Example Usage (only runs when the script is executed directly)
+    @staticmethod
+    def is_configured() -> bool: return LLMHandler._is_configured
+
 if __name__ == "__main__":
-    print("\nRunning llm_handler directly for testing...")
+    print("\nRunning llm_handler.py directly for testing...")
+    load_dotenv() 
+    
+    # Explicitly fetch API key for the test setup messages
+    api_key_for_test_message = os.getenv("GEMINI_API_KEY")
+    if not api_key_for_test_message:
+        api_key_for_test_message = os.getenv("GOOGLE_API_KEY") # Check V1.0 name
 
-    # 1. Configure the LLM
-    config_success = configure_llm()
-
-    # 2. If configuration is successful, try generating text
-    if config_success:
-        print("-" * 20)
-        sample_prompt = "Explain the concept of Price-to-Earnings (P/E) ratio in simple terms for a beginner investor."
-        print(f"Sending sample prompt:\n\"{sample_prompt}\"")
-
-        generated_content = generate_text(prompt=sample_prompt, model_name="gemini-1.5-flash") # Or "gemini-1.0-pro"
-
-        print("-" * 20)
-        if generated_content:
-            print("\nGenerated Response:")
-            print(generated_content)
-        else:
-            print("\nFailed to generate response for the sample prompt.")
+    if api_key_for_test_message:
+        print(f"API key (GEMINI_API_KEY or GOOGLE_API_KEY) found in .env for llm_handler.py direct test.")
     else:
-        print("\nSkipping text generation test due to configuration failure.")
+        print("Warning: GEMINI_API_KEY or GOOGLE_API_KEY not found in .env for direct test message, but constructor will try fallbacks.")
+
+    print("\nTest 1: Initializing LLMHandler (gemini-1.5-flash-latest)...")
+    # Let constructor handle API key loading logic internally
+    handler_instance1 = LLMHandler(model_name="gemini-1.5-flash-latest") 
+    
+    if handler_instance1.is_configured() and handler_instance1.model:
+        print("-" * 20)
+        sample_prompt = "What is the capital of France?"
+        print(f"Sending sample prompt to handler_instance1 ({handler_instance1.model_name}):\n\"{sample_prompt}\"")
+        generated_content = handler_instance1.generate_text(prompt=sample_prompt)
+        print("-" * 20)
+        if generated_content: print(f"\nGenerated Response:\n{generated_content}")
+        else: print("\nFailed to generate response from handler_instance1.")
+    else:
+        print("\nSkipping Test 1 generation due to configuration/model init failure.")
+
+    print("\nTest 2: Initializing another LLMHandler instance (gemini-1.5-pro-latest)...")
+    # Use another known working model for the second instance test
+    handler_instance2 = LLMHandler(model_name="gemini-1.5-pro-latest") 
+    if handler_instance2.is_configured() and handler_instance2.model:
+        print("-" * 20)
+        sample_prompt_2 = "Briefly explain what a stock market is."
+        print(f"Sending sample prompt to handler_instance2 ({handler_instance2.model_name}):\n\"{sample_prompt_2}\"")
+        generated_content_2 = handler_instance2.generate_text(prompt=sample_prompt_2)
+        print("-" * 20)
+        if generated_content_2: print(f"\nGenerated Response:\n{generated_content_2}")
+        else: print("\nFailed to generate response from handler_instance2.")
+    else:
+        print("\nSkipping Test 2 generation due to configuration/model init failure.")
